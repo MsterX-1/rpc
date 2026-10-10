@@ -10,7 +10,9 @@ import (
 
 type pingServer struct{}
 
-func (*pingServer) Ping(id int) (string, error) { return fmt.Sprintf("Pong%d", id), nil }
+func (*pingServer) Ping(id int) (string, error) {
+	return fmt.Sprintf("Pong%d", id), nil
+}
 
 func main() {
 	server, err := rpc.NewServer(&pingServer{})

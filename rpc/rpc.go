@@ -57,20 +57,97 @@ func NewServer(receiver any) (*Server, error) {
 // and launch the accept loop without blocking the caller.
 // Start begins accepting remote calls at address. Use port 0 to request an available port.
 func (s *Server) Start(address string) error {
-	return errors.New("TODO: implement Server.Start")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.listener != nil {
+		return errors.New("server already started , rejecting duplicate start")
+	}
+
+	ln, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
+	}
+
+	s.listener = ln
+	s.stopped = make(chan struct{})
+	s.acceptDone = make(chan struct{})
+
+	go s.acceptLoop()
+
+	return nil
+}
+
+func (s *Server) acceptLoop() {
+	defer close(s.acceptDone)
+	for {
+		conn, err := s.listener.Accept() //wait for a new connection
+		if err != nil {
+			select {
+			case <-s.stopped:
+				return // Server is stopping, exit the loop
+			default:
+				// Log the error and continue accepting new connections
+				fmt.Printf("Failed to accept connection: %v\n", err)
+				continue
+			}
+		}
+		s.workers.Add(1) // increment the worker count
+		go func() {
+			defer s.workers.Done() // decrement the worker count
+			s.handle(conn)
+		}()
+	}
 }
 
 // TODO 2: Return the listener address safely while allowing port 0 discovery.
 // Address returns the address assigned to the running server.
 func (s *Server) Address() string {
-	return ""
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.listener == nil {
+		return ""
+	}
+
+	return s.listener.Addr().String()
 }
 
 // TODO 3: Close the listener, signal the accept loop, wait for its workers,
 // and leave the server in a state where Start can be called again.
 // Stop stops accepting new connections and waits for active handlers to finish.
 func (s *Server) Stop() error {
-	return errors.New("TODO: implement Server.Stop")
+	s.mu.Lock()
+
+	if s.listener == nil {
+		s.mu.Unlock()
+		return nil
+	}
+
+	// Capture references locally before releasing the lock
+	stopped := s.stopped
+	acceptDone := s.acceptDone
+	ln := s.listener
+
+	// Signal shutdown and unblock listener.Accept()
+	close(stopped)
+	ln.Close()
+
+	// Release lock before waiting so Address() never blocks
+	s.mu.Unlock()
+
+	// Wait for the accept loop and active workers to exit
+	<-acceptDone
+	s.workers.Wait()
+
+	// Re-lock to reset fields so Start can be called again
+	s.mu.Lock()
+	s.listener = nil
+	s.stopped = nil
+	s.acceptDone = nil
+	s.mu.Unlock()
+
+	return nil
 }
 
 // TODO 4: Study this starter request handler, then complete and test the protocol
