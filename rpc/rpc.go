@@ -118,36 +118,23 @@ func (s *Server) Address() string {
 // Stop stops accepting new connections and waits for active handlers to finish.
 func (s *Server) Stop() error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.listener == nil {
-		s.mu.Unlock()
 		return nil
 	}
 
-	// Capture references locally before releasing the lock
-	stopped := s.stopped
-	acceptDone := s.acceptDone
-	ln := s.listener
+	close(s.stopped)
+	err := s.listener.Close()
 
-	// Signal shutdown and unblock listener.Accept()
-	close(stopped)
-	ln.Close()
-
-	// Release lock before waiting so Address() never blocks
-	s.mu.Unlock()
-
-	// Wait for the accept loop and active workers to exit
-	<-acceptDone
+	<-s.acceptDone
 	s.workers.Wait()
 
-	// Re-lock to reset fields so Start can be called again
-	s.mu.Lock()
 	s.listener = nil
 	s.stopped = nil
 	s.acceptDone = nil
-	s.mu.Unlock()
 
-	return nil
+	return err
 }
 
 // TODO 4: Study this starter request handler, then complete and test the protocol
