@@ -128,7 +128,7 @@ func (s *Server) Stop() error {
 	close(s.stopped)
 	err := s.listener.Close()
 
-	<-s.acceptDone
+	<-s.acceptDone // Wait for the accept loop to finish
 	s.workers.Wait()
 
 	s.listener = nil
@@ -233,7 +233,7 @@ func (s *Server) invoke(req request) (any, error) {
 	}
 	arguments := make([]reflect.Value, len(req.Args))
 	for index, raw := range req.Args {
-		argument := reflect.New(typeOfMethod.In(index))
+		argument := reflect.New(typeOfMethod.In(index)) // get the type of the argument
 		if err := json.Unmarshal(raw, argument.Interface()); err != nil {
 			return nil, fmt.Errorf("argument %d: %v", index, err)
 		}
@@ -248,9 +248,9 @@ func (s *Server) invoke(req request) (any, error) {
 	}
 	if last := outputs[len(outputs)-1]; last.Type().Implements(errorType) {
 		if !isNilValue(last) {
-			return nil, last.Interface().(error)
+			return nil, last.Interface().(error) // return the error if it's not nil
 		}
-		outputs = outputs[:len(outputs)-1]
+		outputs = outputs[:len(outputs)-1] // remove last output if it's an error and is nil
 	}
 	if len(outputs) == 0 {
 		return nil, nil
