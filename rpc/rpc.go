@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -145,6 +146,7 @@ func (s *Server) Stop() error {
 // handle reads one request, invokes it, and writes one response.
 func (s *Server) handle(connection net.Conn) {
 	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(defaultCallTimeout))
 	encoder := json.NewEncoder(connection)
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -179,7 +181,28 @@ func (s *Server) handle(connection net.Conn) {
 // larger than maxArgumentBytes, and requests larger than maxRequestBytes.
 // validateRequest rejects malformed or abusive requests before reflection runs.
 func validateRequest(req request) error {
-	return errors.New("TODO: implement validateRequest")
+	if req.Method == "" {
+		return errors.New("method cannot be empty")
+	}
+	for _, r := range req.Method {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return errors.New("method name contains whitespace or control characters")
+		}
+	}
+	if len(req.Args) > maxArguments {
+		return errors.New("too many arguments")
+	}
+	total := 0
+	for _, arg := range req.Args {
+		if len(arg) > maxArgumentBytes {
+			return errors.New("argument is larger than the allowed size")
+		}
+		total += len(arg)
+		if total > maxRequestBytes {
+			return errors.New("request is larger than the allowed size")
+		}
+	}
+	return nil
 }
 
 // TODO 6: Study and test this starter reflection bridge. Your required work is to
@@ -195,6 +218,16 @@ func (s *Server) invoke(req request) (any, error) {
 		return nil, fmt.Errorf("unknown method %q", req.Method)
 	}
 	typeOfMethod := method.Type()
+	errorType := reflect.TypeOf((*error)(nil)).Elem()
+	if typeOfMethod.IsVariadic() {
+		return nil, fmt.Errorf("method %q is variadic and is not supported", req.Method)
+	}
+	if typeOfMethod.NumOut() > 2 {
+		return nil, fmt.Errorf("method %q has %d results, at most 2 are supported", req.Method, typeOfMethod.NumOut())
+	}
+	if typeOfMethod.NumOut() == 2 && !typeOfMethod.Out(1).Implements(errorType) {
+		return nil, fmt.Errorf("method %q second result must be error", req.Method)
+	}
 	if typeOfMethod.NumIn() != len(req.Args) {
 		return nil, fmt.Errorf("method %q expects %d arguments, got %d", req.Method, typeOfMethod.NumIn(), len(req.Args))
 	}
@@ -213,7 +246,7 @@ func (s *Server) invoke(req request) (any, error) {
 	if len(outputs) == 0 {
 		return nil, nil
 	}
-	if last := outputs[len(outputs)-1]; last.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
+	if last := outputs[len(outputs)-1]; last.Type().Implements(errorType) {
 		if !isNilValue(last) {
 			return nil, last.Interface().(error)
 		}
@@ -261,5 +294,63 @@ func NewClient(address string) (*Client, error) {
 // response, return remote errors, and decode the response into out.
 // Call invokes method and decodes its result into out. Pass nil for no result.
 func (c *Client) Call(method string, out any, args ...any) error {
-	return errors.New("TODO: implement Client.Call")
+	if method == "" {
+		return errors.New("method cannot be empty")
+	}
+
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = defaultCallTimeout
+	}
+
+	conn, err := net.DialTimeout("tcp", c.Address, timeout)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return fmt.Errorf("timeout connecting: %w", err)
+		}
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("deadline: %w", err)
+	}
+
+	encoded := make([]json.RawMessage, len(args))
+	for index, arg := range args {
+		raw, err := json.Marshal(arg)
+		if err != nil {
+			return fmt.Errorf("encode argument %d: %w", index, err)
+		}
+		encoded[index] = raw
+	}
+
+	if err := json.NewEncoder(conn).Encode(request{Method: method, Args: encoded}); err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return fmt.Errorf("timeout encode: %w", err)
+		}
+		return fmt.Errorf("encode: %w", err)
+	}
+
+	var resp response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return fmt.Errorf("timeout decode: %w", err)
+		}
+		return fmt.Errorf("decode: %w", err)
+	}
+
+	if !resp.OK {
+		if resp.Error != "" {
+			return errors.New(resp.Error)
+		}
+		return errors.New("remote call failed")
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(resp.Value, out); err != nil {
+		return fmt.Errorf("decode result: %w", err)
+	}
+	return nil
 }
